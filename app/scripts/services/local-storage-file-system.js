@@ -154,7 +154,6 @@ angular.module('fs')
               }
             });
         }
-
         deferred.resolve(findFolder(path));
       }, delay);
 

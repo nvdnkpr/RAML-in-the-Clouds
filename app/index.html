@@ -49,7 +49,6 @@
     <script src="bower_components/es5-shim/es5-shim.js"></script>
     <script src="bower_components/showdown/src/showdown.js"></script>
     <script src="bower_components/showdown/src/extensions/table.js"></script>
-
     <script src="bower_components/raml-js-parser/dist/raml-parser.js"></script>
     <script src="bower_components/api-console/dist/scripts/vendor/jquery.js"></script>
     <script src="bower_components/api-console/dist/scripts/vendor/vkbeautify.js"></script>
@@ -87,6 +86,223 @@
     <script src="scripts/directives/raml-editor-file-browser.js"></script>
     <script src="scripts/directives/raml-editor-save-file-button.js"></script>
     <script src="scripts/directives/raml-editor-new-file-button.js"></script>
+
+    <script src="https://sdk.amazonaws.com/js/aws-sdk-2.0.0-rc9.min.js"></script>
     <!-- endbuild -->
+
+   <script>
+      // This part is needed only if you want to provide your own Persistance Implementation
+      // Angular Module must match "ramlEditorApp"
+      angular.module('ramlEditorApp')
+      .factory('MyFileSystem', function ($q, config, eventService) {
+        var service = {};
+        var delay   = 500;
+        
+        var s3 = new AWS.S3({accessKeyId: 'S3KEYHERE', secretAccessKey:
+          'S3SECRETHERE', region: 'us-west-1'});
+
+        var rootBucket = 'raml-in-the-clouds';
+
+        function pushEntry (path, folder) {
+          var entry;
+          // console.log('pushEntry');
+          s3.getObject({Bucket:rootBucket, Key:pathToS3(path)}, function (err, data) {
+            if (err) {
+              console.log("Could not get object "+err);
+            } else {
+              entry = JSON.parse(data.Body);
+              // console.log("Getting entry:");
+              // console.log(entry);
+              folder.children.push(entry);
+            }
+          });
+        }
+
+        function validatePath(path) {
+          if (path.indexOf('/') !== 0) {
+            return {valid: false, reason: 'Path should start with "/"'};
+          }
+          return {valid: true};
+        }
+
+        function extractNameFromPath(path) {
+          var pathInfo = validatePath(path);
+
+          if (!pathInfo.valid) {
+            throw 'Invalid Path!';
+          }
+
+          // When the path is ended in '/'
+          if (path.lastIndexOf('/') === path.length - 1) {
+            path = path.slice(0, path.length - 1);
+          }
+
+          return path.slice(path.lastIndexOf('/') + 1);
+        }
+
+        function findFiles(folder, s3objects, prefix) {
+          var i, obj, key
+          var entry = {};
+          for(i=0; i < s3objects.Contents.length; i++) {
+            obj = s3objects.Contents[i];
+            key = pathFromS3(obj.Key);
+            // console.log('finder');
+            // console.log(key);
+            // console.log(prefix);
+            // console.log(isFile(key, prefix));
+            if(isFile(key, prefix)) {
+              pushEntry(key,folder);
+            }
+          }
+        }
+
+        function isFile(fullpath, prefix) {
+          path = fullpath.replace(prefix, '');
+          if (path == '' || path.indexOf('/') != -1) {
+            return false;
+          }
+          return true;
+        }
+
+        function pathToS3(path) {
+          return 'root'+path;
+        }
+
+        function pathFromS3(path) {
+          return path.slice(4);
+        }
+
+        function fileNotFoundMessage(path) {
+          return 'file with path="' + path + '" does not exist';
+        }
+
+        service.directory = function (path) {
+          var deferred = $q.defer();
+          var name = extractNameFromPath(path);
+          if (name == '') {
+            name = '/';
+          }
+
+          var folder = {
+            'path': path,
+            'name': name,
+            'type': 'folder',
+            'meta': {
+              'created': Math.round(new Date().getTime()/1000.0)
+            },
+            'children': []
+          };
+          
+          s3.listObjects({Bucket:rootBucket, Prefix:pathToS3(path)}, function (err, data) {
+            if(err) {
+              console.log("Directory listing failed "+err);
+              deferred.reject("Authorization error.");
+              return deferred.promise;
+            } else {
+              // console.log("Directory: ");
+              // console.log(data);
+              findFiles(folder, data, path);
+              console.log('findFiles: ');
+              console.log(folder);
+              deferred.resolve(folder);
+            }
+          });
+
+          return deferred.promise;
+        };
+
+        service.load = function (path) {
+          var deferred = $q.defer();
+
+          s3.getObject({Bucket:rootBucket, Key:pathToS3(path)}, function (err, data) {
+            if (err) {
+              deferred.reject(fileNotFoundMessage(path));
+            } else {
+              // console.log("Getting object:");
+              // console.log(path);
+              // console.log(JSON.parse(data.Body));
+              // console.log(JSON.parse(data.Body).Metadata);
+              deferred.resolve(JSON.parse(data.Body).content);
+            }
+          });
+        
+          return deferred.promise;
+        };
+
+        service.remove = function (path) {
+          var deferred = $q.defer();
+          
+          s3.deleteObject({Bucket:rootBucket, Key:pathToS3(path)}, function (err, data) {
+            if (err) {
+              deferred.reject(fileNotFoundMessage(path));
+            } else {
+              deferred.resolve();
+            }
+          });
+        
+          return deferred.promise;
+        };
+
+        service.save = function (path, content) {
+          var deferred = $q.defer();
+          var name = extractNameFromPath(path);
+          var entry;
+
+          s3.getObject({Bucket:rootBucket, Key:pathToS3(path)}, function (err, data) {
+            if (!err) {
+              entry = JSON.parse(data.Body);
+            }
+          });
+
+          var file = {};
+          if (entry) {
+            if (entry.type === FOLDER) {
+              deferred.reject('file has the same name as a folder');
+              return deferred.promise;
+            }
+            entry.content = content;
+            entry.meta.lastUpdated = Math.round(new Date().getTime()/1000.0);
+            file = entry;
+          } else {
+            file = {
+              'path': path,
+              'name': name,
+              'content': content,
+              'type': 'file',
+              'meta': {
+                'created': Math.round(new Date().getTime()/1000.0)
+              }
+            };
+          }
+
+          s3.putObject({Bucket:rootBucket, Key:pathToS3(path), Body:JSON.stringify(file)}, function (err, data) {
+            if(err) {
+              console.log("Save failed "+err);
+              deferred.reject("Save failed");
+            } else {
+              eventService.broadcast('event:notification',
+                {message: 'File saved.', expires: true});
+              deferred.resolve();
+            }
+          })
+          
+          return deferred.promise;
+        };
+
+        return service;
+      })
+      .run(function (MyFileSystem, config, eventService) {
+        // Set MyFileSystem as the filesystem to use
+        config.set('fsFactory', 'MyFileSystem');
+        
+        // In case you want to send notifications to the user
+        // (for instance, that he must login to save).
+        // The expires flags means whether
+        // it should be hidden after a period of time or the
+        // user should dismiss it manually.
+
+      });
+
+    </script>
   </body>
 </html>
